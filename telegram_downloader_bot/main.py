@@ -8,7 +8,12 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 from config import BOT_TOKEN, LOG_LEVEL, DOWNLOAD_DIR, TEMP_DIR
-from handlers import start_router, media_router
+
+# Routerni handlers/start.py faylidan start_router nomi bilan import qilamiz
+from handlers.start import start_router
+# media.py ichida ham router nomi media_router bo'lsa:
+from handlers.media import media_router  
+
 from utils.file_utils import FileUtils
 
 # Logging sozlamalari
@@ -56,10 +61,10 @@ def register_routers(dp: Dispatcher) -> None:
         dp: Dispatcher obyekti
     """
     # Start va help handlerlari
-    dp.include_router(start_router.start_router)
+    dp.include_router(start_router)
     
     # Media handler (asosiy)
-    dp.include_router(media_router.media_router)
+    dp.include_router(media_router)
     
     logger.info("Barcha handlerlar ro'yxatdan o'tkazildi.")
 

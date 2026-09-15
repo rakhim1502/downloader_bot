@@ -1,28 +1,29 @@
 """
 Media handler - Instagram, TikTok va YouTube havolalarini qayta ishlash.
 """
+import asyncio
+import html
 import logging
-from aiogram import Router, F
-from aiogram.types import Message
+import os
 
-from config import MAX_FILE_SIZE_MB, MAX_FILE_SIZE_BYTES
-from utils.url_parser import URLParser, PlatformType
-from services.downloader import MediaDownloader, MediaType
+from aiogram import F, Router
+from aiogram.types import FSInputFile, Message
+from aiogram.utils.media_group import MediaGroupBuilder
+
+from config import MAX_FILE_SIZE_BYTES, MAX_FILE_SIZE_MB
+from services.downloader import MediaDownloader, MediaInfo, MediaType
+from utils.url_parser import PlatformType, URLParser
 
 media_router = Router()
 logger = logging.getLogger(__name__)
 
-# Downloader instansini yaratish
+# Downloader instansiyasini yaratish
 downloader = MediaDownloader()
 
 
 async def send_status_message(message: Message, text: str) -> None:
     """
     Holat xabarini yuboradi yoki yangilaydi.
-    
-    Args:
-        message: Asl xabar
-        text: Yangi holat matni
     """
     try:
         await message.answer(text=text)
@@ -34,18 +35,15 @@ async def send_status_message(message: Message, text: str) -> None:
 async def handle_media_url(message: Message) -> None:
     """
     Foydalanuvchidan kelgan havolani qayta ishlaydi.
-    
-    Args:
-        message: Xabar obyekti
     """
     text = message.text.strip()
-    
+
     if not text:
         return
-    
+
     # URL'larni ajratib olish
     parsed_urls = URLParser.parse_message(text)
-    
+
     if not parsed_urls:
         await message.answer(
             "❌ Noto'g'ri havola. Iltimos, Instagram, TikTok yoki YouTube havolasini yuboring.\n\n"
@@ -55,56 +53,55 @@ async def handle_media_url(message: Message) -> None:
             "• https://youtube.com/shorts/ABC123"
         )
         return
-    
+
     # Har bir URL uchun alohida ishlov berish
     for url_info in parsed_urls:
         if not url_info["valid"]:
             await message.answer(
-                f"❌ Qo'llab-quvvatlanmaydigan havola: `{url_info['url']}`\n\n"
+                f"❌ Qo'llab-quvvatlanmaydigan havola: `{html.escape(url_info['url'])}`\n\n"
                 "Faqat Instagram, TikTok va YouTube havolalari ishlaydi.",
                 parse_mode="Markdown",
             )
             continue
-        
+
         platform = url_info["platform"]
         url = url_info["url"]
-        
-        # Platforma nomi chiroyli ko'rinishi
+
+        # Platforma emojisi
         platform_emoji = {
             "instagram": "📸",
             "tiktok": "🎵",
             "youtube": "📺",
         }.get(platform, "🔗")
-        
+
         # Status xabari yuborish
         status_msg = await message.answer(
             f"{platform_emoji} **{platform.title()}**\n\n"
             "📥 Havola ishlanmoqda...\n"
-            "⏳ Biroz kuting..."
+            "⏳ Biroz kuting...",
+            parse_mode="Markdown",
         )
-        
+
         try:
-            # Media yuklash
+            # Holatni yangilash uchun callback
             async def update_status(status_text: str):
-                """Holatni yangilash uchun callback."""
                 try:
                     await status_msg.edit_text(
                         text=f"{platform_emoji} **{platform.title()}**\n\n{status_text}",
                         parse_mode="Markdown",
                     )
                 except Exception:
-                    # Agar edit qilib bo'lmasa, yangi xabar yuborish
                     pass
-            
-            media_info = await downloader.download(
+
+            media_info: MediaInfo = await downloader.download(
                 url=url,
                 platform=platform,
                 status_callback=update_status,
             )
-            
+
             if not media_info:
                 await status_msg.edit_text(
-                    f"❌ **Xatolik!**\n\n"
+                    "❌ **Xatolik!**\n\n"
                     "Video yuklanmadi. Sabablari:\n"
                     "• Havola noto'g'ri yoki eskirgan\n"
                     "• Profil yopiq (private)\n"
@@ -113,17 +110,21 @@ async def handle_media_url(message: Message) -> None:
                     parse_mode="Markdown",
                 )
                 continue
-            
+
             # Fayl hajmini tekshirish
             if media_info.is_carousel and media_info.carousel_items:
-                # Karusel uchun har bir faylni tekshirish
                 total_size = sum(
-                    os.path.getsize(f) for f in media_info.carousel_items 
+                    os.path.getsize(f)
+                    for f in media_info.carousel_items
                     if os.path.exists(f)
                 )
             else:
-                total_size = media_info.filesize or 0
-            
+                total_size = media_info.filesize or (
+                    os.path.getsize(media_info.file_path)
+                    if media_info.file_path and os.path.exists(media_info.file_path)
+                    else 0
+                )
+
             if total_size > MAX_FILE_SIZE_BYTES:
                 size_mb = total_size / (1024 * 1024)
                 await status_msg.edit_text(
@@ -134,155 +135,137 @@ async def handle_media_url(message: Message) -> None:
                     "Iltimos, boshqa videoni tanlang.",
                     parse_mode="Markdown",
                 )
-                # Faylni tozalash
                 await downloader.cleanup(media_info)
                 continue
-            
-            # Telegramga yuborish
+
+            # Telegramga yuborish haqida xabar
+            title_preview = (
+                media_info.title[:50] + "..."
+                if media_info.title and len(media_info.title) > 50
+                else (media_info.title or "Noma'lum")
+            )
             await status_msg.edit_text(
                 f"✅ **Tayyor!**\n\n"
-                f"📝 Nom: {media_info.title[:50]}{'...' if len(media_info.title) > 50 else ''}\n"
-                "👤 Muallif: " + (media_info.author or "Noma'lum") + "\n"
+                f"📝 Nom: {html.escape(title_preview)}\n"
+                f"👤 Muallif: {html.escape(media_info.author or 'Noma\'lum')}\n"
                 f"📊 Hajm: {total_size / 1024 / 1024:.1f} MB\n\n"
                 "📤 Telegramga yuborilmoqda...",
                 parse_mode="Markdown",
             )
-            
-            # Karusel yoki oddiy video/rasm
+
+            # Karusel yoki bittalik media yuborish
             if media_info.is_carousel and media_info.carousel_items:
-                # Ko'p mediali post (Instagram carousel)
                 await send_carousel(message, media_info)
             else:
-                # Bitta video yoki rasm
                 if media_info.media_type == MediaType.VIDEO:
                     await send_video(message, media_info)
                 else:
                     await send_photo(message, media_info)
-            
+
             # Yakuniy xabar
             await message.answer(
                 "✅ Yuklash muvaffaqiyatli amalga oshirildi!\n\n"
                 "Yana havola yuboring 👇"
             )
-            
+
             # Fayllarni tozalash
             await downloader.cleanup(media_info)
-            
+
         except Exception as e:
             logger.error(f"Media qayta ishlashda xatolik: {e}", exc_info=True)
             await status_msg.edit_text(
                 f"❌ **Kutilmagan xatolik!**\n\n"
-                f"Xabar: {str(e)[:200]}\n\n"
+                f"Xabar: {html.escape(str(e)[:200])}\n\n"
                 "Iltimos, keyinroq qayta urinib ko'ring.",
                 parse_mode="Markdown",
             )
 
 
-async def send_video(message: Message, media_info) -> None:
-    """
-    Videoni Telegramga yuboradi.
-    
-    Args:
-        message: Xabar obyekti
-        media_info: Media ma'lumotlari
-    """
+async def send_video(message: Message, media_info: MediaInfo) -> None:
     try:
-        author_name = media_info.author if media_info.author else "Noma'lum"
-        caption = (
-            f"📹 **{media_info.title[:100]}**\n\n"
-            f"👤 {author_name}\n"
-            f"🔗 Platforma: {media_info.platform.title()}"
+        video_file = FSInputFile(media_info.file_path)
+
+        caption = f"🎬 <b>{html.escape(media_info.title or '')}</b>"
+        if media_info.author:
+            caption += f"\n👤 <b>Muallif:</b> {html.escape(media_info.author)}"
+
+        await message.answer_video(
+            video=video_file,
+            caption=caption[:1024],  # Telegram caption limiti 1024 belgi
+            parse_mode="HTML",
         )
-        
-        with open(media_info.file_path, 'rb') as video_file:
-            await message.answer_video(
-                video=video_file,
-                caption=caption,
-                parse_mode="Markdown",
-            )
     except Exception as e:
         logger.error(f"Video yuborishda xatolik: {e}")
-        await message.answer(f"❌ Video yuborishda xatolik: {str(e)}")
-
-
-async def send_photo(message: Message, media_info) -> None:
-    """
-    Rasmni Telegramga yuboradi.
-    
-    Args:
-        message: Xabar obyekti
-        media_info: Media ma'lumotlari
-    """
-    try:
-        author_name = media_info.author if media_info.author else "Noma'lum"
-        caption = (
-            f"📷 **{media_info.title[:100]}**\n\n"
-            f"👤 {author_name}\n"
-            f"🔗 Platforma: {media_info.platform.title()}"
+        safe_error_text = html.escape(str(e))
+        await message.answer(
+            f"❌ Video yuborishda xatolik: {safe_error_text}",
+            parse_mode="HTML",
         )
-        
-        with open(media_info.file_path, 'rb') as photo_file:
-            await message.answer_photo(
-                photo=photo_file,
-                caption=caption,
-                parse_mode="Markdown",
-            )
+
+
+async def send_photo(message: Message, media_info: MediaInfo) -> None:
+    try:
+        photo_file = FSInputFile(media_info.file_path)
+        author_name = media_info.author if media_info.author else "Noma'lum"
+
+        caption = (
+            f"📷 <b>{html.escape((media_info.title or '')[:100])}</b>\n\n"
+            f"👤 <b>Muallif:</b> {html.escape(author_name)}\n"
+            f"🔗 <b>Platforma:</b> {html.escape(str(media_info.platform).title())}"
+        )
+
+        await message.answer_photo(
+            photo=photo_file,
+            caption=caption,
+            parse_mode="HTML",
+        )
     except Exception as e:
         logger.error(f"Rasm yuborishda xatolik: {e}")
-        await message.answer(f"❌ Rasm yuborishda xatolik: {str(e)}")
+        await message.answer(
+            f"❌ Rasm yuborishda xatolik: {html.escape(str(e))}",
+            parse_mode="HTML",
+        )
 
 
-async def send_carousel(message: Message, media_info) -> None:
+async def send_carousel(message: Message, media_info: MediaInfo) -> None:
     """
-    Instagram karusel (ko'p media) ni yuboradi.
-    
-    Args:
-        message: Xabar obyekti
-        media_info: Media ma'lumotlari (carousel_items bilan)
+    Instagram karusel (ko'p media) ni Telegram Media Group (albom) shaklida yuboradi.
     """
     try:
         if not media_info.carousel_items:
             await message.answer("❌ Karusel elementlari topilmadi.")
             return
-        
-        # Har bir elementni alohida yuborish
-        for idx, file_path in enumerate(media_info.carousel_items, 1):
+
+        media_group = MediaGroupBuilder()
+        author_name = media_info.author if media_info.author else "Noma'lum"
+        main_caption = (
+            f"📱 <b>{html.escape((media_info.title or '')[:100])}</b>\n"
+            f"👤 <b>Muallif:</b> {html.escape(author_name)}"
+        )
+
+        # Telegram bitta media guruhda maksimum 10 ta fayl qabul qiladi
+        items = media_info.carousel_items[:10]
+
+        for idx, file_path in enumerate(items):
             if not os.path.exists(file_path):
                 continue
-            
-            # Fayl turi aniqlash
-            is_video = file_path.endswith(('.mp4', '.webm', '.mov'))
-            
-            author_name = media_info.author if media_info.author else "Noma'lum"
-            caption = (
-                f"📱 **Karusel {idx}/{len(media_info.carousel_items)}**\n\n"
-                f"📷 {media_info.title[:100]}\n"
-                f"👤 {author_name}"
-            )
-            
+
+            file_input = FSInputFile(file_path)
+            is_video = file_path.lower().endswith((".mp4", ".webm", ".mov"))
+
+            # Faqat birinchi media-faylga caption beriladi
+            caption = main_caption if idx == 0 else None
+
             if is_video:
-                with open(file_path, 'rb') as video_file:
-                    await message.answer_video(
-                        video=video_file,
-                        caption=caption,
-                        parse_mode="Markdown",
-                    )
+                media_group.add_video(media=file_input, caption=caption, parse_mode="HTML")
             else:
-                with open(file_path, 'rb') as photo_file:
-                    await message.answer_photo(
-                        photo=photo_file,
-                        caption=caption,
-                        parse_mode="Markdown",
-                    )
-            
-            # Kichik kechikish (rate limit)
-            import asyncio
-            await asyncio.sleep(0.5)
-            
+                media_group.add_photo(media=file_input, caption=caption, parse_mode="HTML")
+
+        await message.answer_media_group(media=media_group.build())
+
     except Exception as e:
         logger.error(f"Karusel yuborishda xatolik: {e}")
-        await message.answer(f"❌ Karusel yuborishda xatolik: {str(e)}")
-
-
-# Import os module for file operations
-import os
+        await message.answer(
+            f"❌ Karusel yuborishda xatolik: {html.escape(str(e))}",
+            parse_mode="HTML",
+        )

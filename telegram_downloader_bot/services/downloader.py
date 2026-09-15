@@ -5,6 +5,7 @@ yt-dlp kutubxonasidan foydalanadi.
 import os
 import asyncio
 import logging
+import uuid
 from typing import Optional, Dict, List, Any
 from dataclasses import dataclass
 from enum import Enum
@@ -54,17 +55,8 @@ class MediaDownloader:
         os.makedirs(self.temp_dir, exist_ok=True)
         logger.info(f"Papkalar tayyorlandi: {self.download_dir}, {self.temp_dir}")
 
-    def _get_ydl_options(self, platform: str, output_template: str) -> Dict:
-        """
-        Platformaga mos yt-dlp sozlamalarini qaytaradi.
-        
-        Args:
-            platform: Platforma nomi (instagram, tiktok, youtube)
-            output_template: Fayl nomi shabloni
-            
-        Returns:
-            yt-dlp options dict
-        """
+    def _get_ydl_options(self, platform: str, output_template: str) -> Dict[str, Any]:
+        """Platformaga mos yt-dlp sozlamalarini qaytaradi."""
         base_options = {
             'outtmpl': output_template,
             'quiet': True,
@@ -79,7 +71,6 @@ class MediaDownloader:
             base_options.update({
                 'format': 'best',
                 'prefer_free_formats': False,
-                # TikTok maxsus sozlamalari
                 'extractor_args': {
                     'tiktok': {
                         'api_hostname': ['api16-normal-c-useast1a.tiktokv.com'],
@@ -90,13 +81,12 @@ class MediaDownloader:
         elif platform == "instagram":
             base_options.update({
                 'format': 'best',
-                # Instagram carousel uchun
                 'extract_flat': False,
             })
         # YouTube: Shorts va oddiy videolar
         elif platform == "youtube":
             base_options.update({
-                'format': 'best[ext=mp4]/best',
+                'format': 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best',
                 'merge_output_format': 'mp4',
             })
 
@@ -108,66 +98,48 @@ class MediaDownloader:
         platform: str,
         status_callback=None
     ) -> Optional[MediaInfo]:
-        """
-        Videoni yuklab oladi.
-        
-        Args:
-            url: Video havolasi
-            platform: Platforma nomi
-            status_callback: Holat xabarlari uchun callback funksiyasi
-            
-        Returns:
-            MediaInfo obyekti yoki None (xatolik bo'lsa)
-        """
+        """Videoni yuklab oladi."""
         if status_callback:
             await status_callback("📥 Havola ishlanmoqda...")
 
         try:
-            # Fayl nomini generatsiya qilish
             filename = FileUtils.generate_filename(platform, "video")
             output_template = os.path.join(self.download_dir, filename)
 
             if status_callback:
                 await status_callback("⬇️ Video yuklanmoqda...")
 
-            # yt-dlp sozlamalari
             ydl_opts = self._get_ydl_options(platform, output_template)
+            loop = asyncio.get_running_loop()
 
-            # Asinxron ravishda yuklash
-            loop = asyncio.get_event_loop()
-            
             def _download():
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=True)
-                    return info
+                    # Real fayl yo'lini aniqlash
+                    file_path = ydl.prepare_filename(info)
+                    return info, file_path
 
-            info = await loop.run_in_executor(None, _download)
+            info, file_path = await loop.run_in_executor(None, _download)
 
             if not info:
                 logger.error("Video ma'lumotlari olinmadi")
                 return None
 
-            # Fayl yo'lini aniqlash
-            file_path = info.get('filepath', '')
-            
-            # Agar fayl mavjud bo'lmasa, boshqa variantlarni tekshirish
-            if not file_path or not os.path.exists(file_path):
-                # Fallback: eng yaqin faylni topish
-                base_name = os.path.splitext(output_template)[0]
-                for ext in ['.mp4', '.webm', '.mkv', '.mov']:
-                    test_path = f"{base_name}{ext}"
-                    if os.path.exists(test_path):
-                        file_path = test_path
+            # Agar ko'rsatilgan kengaytma mos kelmasa fallback
+            if not os.path.exists(file_path):
+                base_name = os.path.splitext(file_path)[0]
+                for ext in ['.mp4', '.mkv', '.webm', '.mov']:
+                    if os.path.exists(base_name + ext):
+                        file_path = base_name + ext
                         break
 
-            if not file_path or not os.path.exists(file_path):
+            if not os.path.exists(file_path):
                 logger.error(f"Yuklangan fayl topilmadi: {output_template}")
                 return None
 
             if status_callback:
                 await status_callback("✅ Video tayyor!")
 
-            # Media ma'lumotlarini to'plash
             media_info = MediaInfo(
                 url=url,
                 platform=platform,
@@ -195,23 +167,15 @@ class MediaDownloader:
         url: str,
         status_callback=None
     ) -> Optional[MediaInfo]:
-        """
-        Instagram karusel (ko'p mediali post) ni yuklaydi.
-        
-        Args:
-            url: Instagram post havolasi
-            status_callback: Holat xabarlari uchun callback
-            
-        Returns:
-            MediaInfo obyekti (carousel_items bilan) yoki None
-        """
+        """Instagram karusel (ko'p mediali post) ni yuklaydi."""
         if status_callback:
             await status_callback("📥 Karusel ishlanmoqda...")
 
         try:
+            unique_id = uuid.uuid4().hex[:8]
             output_template = os.path.join(
                 self.download_dir,
-                f"instagram_carousel_{int(asyncio.get_event_loop().time())}_%(entry_number)d.%(ext)s"
+                f"instagram_carousel_{unique_id}_%(playlist_index)s.%(ext)s"
             )
 
             if status_callback:
@@ -224,31 +188,34 @@ class MediaDownloader:
                 'extract_flat': False,
                 'socket_timeout': REQUEST_TIMEOUT,
                 'retries': 3,
-                # Playlist/Carousel uchun
-                'playlistend': 20,  # Maksimum 20 ta element
+                'playlistend': 20,
             }
 
-            loop = asyncio.get_event_loop()
-            
+            loop = asyncio.get_running_loop()
+
             def _download():
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=True)
-                    return info
+                    carousel_files = []
+                    entries = info.get('entries', [info]) if info else []
+                    
+                    for entry in entries:
+                        if entry:
+                            # yt-dlp tomonidan tayyorlangan fayl yo'li
+                            fp = ydl.prepare_filename(entry)
+                            if os.path.exists(fp):
+                                carousel_files.append(fp)
+                            else:
+                                # Fallback kengaytma izlash
+                                base = os.path.splitext(fp)[0]
+                                for ext in ['.jpg', '.png', '.mp4', '.webp']:
+                                    if os.path.exists(base + ext):
+                                        carousel_files.append(base + ext)
+                                        break
 
-            info = await loop.run_in_executor(None, _download)
+                    return info, carousel_files
 
-            if not info:
-                return None
-
-            # Carousel elementlarini yig'ish
-            carousel_items = []
-            entries = info.get('entries', [info])  # Agar bitta entry bo'lsa ham
-
-            for entry in entries:
-                if entry:
-                    filepath = entry.get('filepath', '')
-                    if filepath and os.path.exists(filepath):
-                        carousel_items.append(filepath)
+            info, carousel_items = await loop.run_in_executor(None, _download)
 
             if not carousel_items:
                 logger.error("Karusel elementlari topilmadi")
@@ -262,7 +229,7 @@ class MediaDownloader:
                 platform="instagram",
                 title=info.get('title', 'Instagram Karusel'),
                 media_type=MediaType.CAROUSEL,
-                file_path=carousel_items[0] if carousel_items else '',
+                file_path=carousel_items[0],
                 thumbnail=info.get('thumbnail'),
                 author=info.get('uploader'),
                 is_carousel=True,
@@ -284,62 +251,33 @@ class MediaDownloader:
         platform: str,
         status_callback=None
     ) -> Optional[MediaInfo]:
-        """
-        Universal yuklash funksiyasi.
-        Platformaga qarab tegishli metodni chaqiradi.
-        
-        Args:
-            url: Media havolasi
-            platform: Platforma nomi
-            status_callback: Holat xabarlari uchun callback
-            
-        Returns:
-            MediaInfo obyekti yoki None
-        """
-        try:
-            # Instagram karusel ekanligini tekshirish
-            if platform == "instagram":
-                # Avval ma'lumotlarni olish
-                loop = asyncio.get_event_loop()
-                
-                def _extract_info():
-                    with yt_dlp.YoutubeDL({'quiet': True, 'extract_flat': False}) as ydl:
-                        return ydl.extract_info(url, download=False)
-                
-                try:
-                    info = await loop.run_in_executor(None, _extract_info)
-                    is_carousel = info.get('entry_count', 0) > 1 or 'entries' in info
-                    
-                    if is_carousel:
-                        return await self.download_instagram_carousel(url, status_callback)
-                except Exception:
-                    pass  # Oddiy video sifatida davom etish
+        """Universal yuklash funksiyasi."""
+        # Instagram uchun to'g'ridan-to'g me'yoriy tekshiruv o'rniga yagona kirish nuqtasi
+        if platform == "instagram":
+            # Avval Karusel sifatida yuklab ko'rish yaxshiroq natija beradi
+            # Chunki karusel bo'lmasa yt-dlp baribir 1 ta fayl yuklaydi
+            res = await self.download_instagram_carousel(url, status_callback)
+            if res and res.carousel_items and len(res.carousel_items) == 1:
+                res.is_carousel = False
+                res.media_type = MediaType.VIDEO
+            return res if res else await self.download_video(url, platform, status_callback)
 
-            # Oddiy video yuklash
-            return await self.download_video(url, platform, status_callback)
-
-        except Exception as e:
-            logger.error(f"Yuklashda umumiy xatolik: {e}", exc_info=True)
-            if status_callback:
-                await status_callback(f"❌ Xatolik: {str(e)[:100]}")
-            return None
+        return await self.download_video(url, platform, status_callback)
 
     async def cleanup(self, media_info: MediaInfo) -> None:
-        """
-        Yuklangan fayllarni tozalaydi.
-        
-        Args:
-            media_info: Media ma'lumotlari
-        """
+        """Yuklangan fayllarni tozalaydi."""
+        if not media_info:
+            return
+
         files_to_clean = []
-        
+
         if media_info.is_carousel and media_info.carousel_items:
             files_to_clean.extend(media_info.carousel_items)
         elif media_info.file_path:
             files_to_clean.append(media_info.file_path)
-        
-        if media_info.thumbnail:
+
+        if media_info.thumbnail and os.path.exists(media_info.thumbnail):
             files_to_clean.append(media_info.thumbnail)
-        
+
         await FileUtils.cleanup_files(files_to_clean)
         logger.debug(f"Fayllar tozalandi: {files_to_clean}")
