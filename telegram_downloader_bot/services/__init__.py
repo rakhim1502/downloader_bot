@@ -1,6 +1,4 @@
-"""
-Media yuklash servislari moduli.
-"""
-from .downloader import MediaDownloader
+# services/__init__.py
+from .downloader import MediaDownloader, MediaInfo, MediaType
 
-__all__ = ["MediaDownloader"]
+__all__ = ["MediaDownloader", "MediaInfo", "MediaType"]
